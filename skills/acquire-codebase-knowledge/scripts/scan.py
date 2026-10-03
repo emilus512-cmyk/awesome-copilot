@@ -36,9 +36,9 @@ EXCLUDE_DIRS = {
     "coverage", ".nyc_output", "generated", ".cache", ".turbo",
     ".yarn", ".pnp", "bin", "obj"
 }
+TEST_DIRS = {"test", "tests", "__tests__", "spec", "__mocks__", "fixtures"}
 
-MANIFESTS = [
-    # JavaScript/Node.js
+MANIFESTS = [    # JavaScript/Node.js
     "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
     "deno.json", "deno.jsonc",
     # Python
@@ -148,6 +148,8 @@ SOURCE_EXTS = [
     "vim", "vim", "hs", "ml", "ml", "nim", "cr",
     "r", "jl", "groovy", "gradle", "xml", "json"
 ]
+SOURCE_EXTS_SET = {ext.lower() for ext in SOURCE_EXTS}
+TODO_PATTERN = re.compile(r"TODO|FIXME|HACK", re.IGNORECASE)
 
 MONOREPO_FILES = ["pnpm-workspace.yaml", "lerna.json", "nx.json", "rush.json", "turbo.json", "moon.yml"]
 MONOREPO_DIRS = ["packages", "apps", "libs", "services", "modules"]
@@ -287,33 +289,34 @@ def find_env_templates() -> List[tuple]:
     return found
 
 
+def iter_project_files(root: Path):
+    """Yield project files while skipping excluded directories and test folders."""
+    for current_root, dirs, files in os.walk(root):
+        dirs[:] = [
+            d for d in dirs
+            if d not in EXCLUDE_DIRS and d not in TEST_DIRS
+        ]
+        for filename in files:
+            filepath = Path(current_root) / filename
+            if filepath.is_file() and filepath.suffix.lstrip('.').lower() in SOURCE_EXTS_SET:
+                yield filepath
+
+
 def search_todos() -> List[str]:
     """Search for TODO/FIXME/HACK comments."""
     todos = []
-    patterns = ["TODO", "FIXME", "HACK"]
-    exclude_dirs_str = "|".join(EXCLUDE_DIRS | {"test", "tests", "__tests__", "spec", "__mocks__", "fixtures"})
+    root = Path.cwd()
 
     try:
-        for root, dirs, files in os.walk(Path.cwd()):
-            # Remove excluded directories from dirs to prevent os.walk from descending
-            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and d not in {"test", "tests", "__tests__", "spec", "__mocks__", "fixtures"}]
-
-            for file in files:
-                # Check file extension
-                ext = Path(file).suffix.lstrip('.')
-                if ext not in SOURCE_EXTS:
-                    continue
-
-                filepath = Path(root) / file
-                try:
-                    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                        for line_num, line in enumerate(f, 1):
-                            for pattern in patterns:
-                                if pattern in line:
-                                    rel_path = filepath.relative_to(Path.cwd())
-                                    todos.append(f"{rel_path}:{line_num}: {line.strip()}")
-                except Exception:
-                    pass
+        for filepath in iter_project_files(root):
+            try:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    for line_num, line in enumerate(f, 1):
+                        if TODO_PATTERN.search(line):
+                            rel_path = filepath.relative_to(root)
+                            todos.append(f"{rel_path}:{line_num}: {line.strip()}")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -480,7 +483,6 @@ def collect_code_metrics() -> dict:
         "largest_files": []
     }
 
-    # Language mapping
     lang_map = {
         "ts": "TypeScript", "tsx": "TypeScript/React", "js": "JavaScript",
         "jsx": "JavaScript/React", "py": "Python", "go": "Go",
@@ -492,44 +494,37 @@ def collect_code_metrics() -> dict:
     }
 
     file_sizes = []
+    root = Path.cwd()
 
     try:
-        for root, dirs, files in os.walk(Path.cwd()):
-            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for filepath in iter_project_files(root):
+            ext = filepath.suffix.lstrip('.').lower()
+            if not ext or ext in {"pyc", "o", "a", "so"}:
+                continue
 
-            for file in files:
-                filepath = Path(root) / file
-                ext = filepath.suffix.lstrip('.')
+            try:
+                size = filepath.stat().st_size
+                file_sizes.append((filepath.relative_to(root), size))
 
-                if not ext or ext in {"pyc", "o", "a", "so"}:
-                    continue
+                metrics["total_files"] += 1
+                metrics["by_extension"][ext] = metrics["by_extension"].get(ext, 0) + 1
 
-                try:
-                    size = filepath.stat().st_size
-                    file_sizes.append((filepath.relative_to(Path.cwd()), size))
+                lang = lang_map.get(ext, "Other")
+                metrics["by_language"][lang] = metrics["by_language"].get(lang, 0) + 1
 
-                    metrics["total_files"] += 1
-                    metrics["by_extension"][ext] = metrics["by_extension"].get(ext, 0) + 1
+                if ext in SOURCE_EXTS_SET and size < 1_000_000:
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            metrics["total_lines"] += sum(1 for _ in f)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-                    lang = lang_map.get(ext, "Other")
-                    metrics["by_language"][lang] = metrics["by_language"].get(lang, 0) + 1
-
-                    # Count lines for text files
-                    if ext in SOURCE_EXTS and size < 1_000_000:  # Skip huge files
-                        try:
-                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                metrics["total_lines"] += len(f.readlines())
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-        # Top 10 largest files
         file_sizes.sort(key=lambda x: x[1], reverse=True)
         metrics["largest_files"] = [
             f"{str(f)}: {s/1024:.1f}KB" for f, s in file_sizes[:10]
         ]
-
     except Exception:
         pass
 
